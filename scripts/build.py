@@ -95,6 +95,11 @@ TEMPLATE = r"""<!DOCTYPE html>
     transition:transform .08s ease, filter .2s;
   }
   .refresh:hover{filter:brightness(1.06)} .refresh:active{transform:translateY(1px) scale(.99)}
+  .navbtn{font-family:system-ui,sans-serif; font-size:18px; font-weight:600; line-height:1; color:var(--ink);
+    background:var(--card); border:1px solid var(--line); border-radius:999px; width:44px; height:44px; cursor:pointer;
+    transition:border-color .15s,color .15s,opacity .15s;}
+  .navbtn:hover:not(:disabled){border-color:var(--accent); color:var(--accent)}
+  .navbtn:disabled{opacity:.35; cursor:default; color:var(--muted)}
   .prefs{flex:0 0 auto; display:flex; gap:9px; align-items:center; justify-content:center; margin-top:14px; flex-wrap:wrap}
   .pref{font-family:system-ui,sans-serif; font-size:13px; font-weight:600; color:var(--muted);
     background:transparent; border:1px solid var(--line); border-radius:999px; padding:8px 14px; cursor:pointer;
@@ -182,8 +187,10 @@ TEMPLATE = r"""<!DOCTYPE html>
       <span class="source" id="qsource"></span>
     </div>
     <div class="controls">
+      <button class="navbtn" id="prev" title="Back to the previous quote (←)" disabled>←</button>
       <button class="refresh" id="refresh">↻ New quote</button>
-      <span class="hint">or press <b>Space</b></span>
+      <button class="navbtn" id="next" title="Forward to the next quote (→)" disabled>→</button>
+      <span class="hint"><b>Space</b> new · <b>← / →</b> back / forward</span>
     </div>
     <div class="prefs">
       <button class="pref" id="less" title="Show less often (↓)">▼ Less</button>
@@ -442,12 +449,17 @@ function renderFreq(){ if(!current) return; const [lab,lvl]=freqInfo(current.wei
 function pulseFreq(){ const f=el('freq'); f.style.transform='scale(1.14)'; setTimeout(()=>f.style.transform='',160); }
 function setCardEnabled(on){ ['more','less','edit','del'].forEach(id=>el(id).disabled=!on); }
 
-function show(){
-  if(!pool.length){ current=null;
-    el('qtheme').textContent=''; el('qtext').innerHTML='<div class="empty">No quotes in this view.<br>Try another theme or restore hidden quotes.</div>';
-    el('qauthor').textContent=''; el('qsource').textContent=''; el('freq').textContent='—'; setCardEnabled(false); return; }
+// ---------- history (back / forward) ----------
+let history=[], histPos=-1;
+function updateNav(){ el('prev').disabled = histPos<=0; el('next').disabled = histPos>=history.length-1; }
+function resetHistory(){ history=[]; histPos=-1; }
+function renderEmpty(){
+  current=null;
+  el('qtheme').textContent=''; el('qtext').innerHTML='<div class="empty">No quotes in this view.<br>Try another theme or restore hidden quotes.</div>';
+  el('qauthor').textContent=''; el('qsource').textContent=''; el('freq').textContent='—'; setCardEnabled(false);
+}
+function renderCard(){
   setCardEnabled(true);
-  current=weightedPick();
   el('qtheme').textContent=current.t;
   el('qtext').textContent='“'+current.q+'”';
   el('qauthor').textContent=current.a;
@@ -456,6 +468,23 @@ function show(){
   const card=el('card'); card.classList.remove('anim'); void card.offsetWidth; card.classList.add('anim');
   fitQuote();
 }
+// New quote: pick a fresh one, dropping any forward history (browser-style).
+function show(){
+  if(!pool.length){ renderEmpty(); updateNav(); return; }
+  current=weightedPick();
+  history=history.slice(0, histPos+1);
+  history.push(current.id);
+  histPos=history.length-1;
+  renderCard(); updateNav();
+}
+function navTo(pos){
+  if(pos<0 || pos>=history.length) return;
+  const it=byId(history[pos]);
+  if(!it){ return; }
+  histPos=pos; current=it; renderCard(); updateNav();
+}
+function goBack(){ navTo(histPos-1); }
+function goForward(){ navTo(histPos+1); }
 let busy=false;
 async function adjust(factor){
   if(!current || busy) return;
@@ -471,7 +500,7 @@ function applyFilter(){
   pool=(v==='__all')?base:base.filter(it=>it.t===v);
   el('count').textContent=pool.length+' quotes'+(v==='__all'?' · '+THEMES.length+' themes':' in this theme')+(store.sheet?' · ☁ Google Sheet':'');
   el('hiddenCount').textContent=hiddenCount();
-  current=null; show();
+  resetHistory(); current=null; show();
 }
 
 function toast(msg, undoFn){
@@ -610,6 +639,8 @@ function renderAccount(){
 
 // ---------- events ----------
 el('refresh').addEventListener('click', show);
+el('prev').addEventListener('click', goBack);
+el('next').addEventListener('click', goForward);
 el('more').addEventListener('click', ()=>adjust(MOREF));
 el('less').addEventListener('click', ()=>adjust(LESSF));
 el('edit').addEventListener('click', ()=>{ if(current){ loadIntoForm(current); openDrawer(); } });
@@ -638,6 +669,8 @@ document.addEventListener('keydown', e=>{
   if(e.code==='Space'){ e.preventDefault(); show(); }
   else if(e.code==='ArrowUp'){ e.preventDefault(); adjust(MOREF); }
   else if(e.code==='ArrowDown'){ e.preventDefault(); adjust(LESSF); }
+  else if(e.code==='ArrowLeft'){ e.preventDefault(); goBack(); }
+  else if(e.code==='ArrowRight'){ e.preventDefault(); goForward(); }
 });
 
 // ---------- boot ----------
