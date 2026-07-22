@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Rebuild index.html from data/quotes.csv. Run:  python3 scripts/build.py"""
+"""Rebuild index.html from data/quotes.csv. Run:  python3 scripts/build.py
+
+Google Sheets mode (optional): bake your Apps Script web-app URL into the page
+so the quote list comes from a Google Sheet and the Less/More/Never-show/Add
+actions write back to it:
+
+  QE_SHEET_API="https://script.google.com/macros/s/AKfy.../exec" \\
+  python3 scripts/build.py
+
+Optional light deterrent shared with the Apps Script (not real security, since
+it ships in the page): QE_SHEET_KEY="somephrase".
+
+With no env vars the page runs in local mode (browser localStorage only),
+using the built-in copy of the quotes as an offline fallback.
+"""
 import json, csv, os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -15,12 +29,21 @@ themes = sorted(set(q["t"] for q in quotes if q["t"]))
 payload = json.dumps(quotes, ensure_ascii=False).replace("</", "<\\/")
 themes_json = json.dumps(themes, ensure_ascii=False)
 
+SHEET_API = os.environ.get("QE_SHEET_API", "").strip()
+SHEET_KEY = os.environ.get("QE_SHEET_KEY", "").strip()
+
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Quote Engine</title>
+<script>
+  // Google Sheets sync. Leave blank for local mode (this browser only).
+  // Baked at build time from QE_SHEET_API / QE_SHEET_KEY env vars, or paste
+  // your Apps Script web-app /exec URL here directly.
+  window.QE_CONFIG = { sheetApi: "__SHEET_API__", sheetKey: "__SHEET_KEY__" };
+</script>
 <style>
   :root{
     --bg:#f4f1ea; --card:#fffdf8; --ink:#1f1b16; --muted:#7c7264; --line:#e6dfd2;
@@ -77,6 +100,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     background:transparent; border:1px solid var(--line); border-radius:999px; padding:8px 14px; cursor:pointer;
     transition:color .15s,border-color .15s,background .15s;}
   .pref:hover{color:var(--ink); border-color:var(--accent)}
+  .pref:disabled{opacity:.45; cursor:default}
   #more:hover{color:var(--accent)}
   .pref.danger:hover{color:var(--danger); border-color:var(--danger)}
   .freq{font-family:system-ui,sans-serif; font-size:12px; font-weight:700; letter-spacing:.03em;
@@ -90,6 +114,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   .count{font-family:system-ui,sans-serif; font-size:13px; color:var(--muted); margin-top:16px; text-align:center}
   .resetlink{color:var(--muted); text-decoration:underline; cursor:pointer}
   .resetlink:hover{color:var(--accent)}
+  .synced{color:var(--accent)}
 
   /* toast */
   .toast{position:fixed; bottom:22px; left:50%; transform:translateX(-50%) translateY(20px);
@@ -113,6 +138,9 @@ TEMPLATE = r"""<!DOCTYPE html>
   .drawer-head b{font-size:18px}
   .sec{border-top:1px solid var(--line); padding:18px 0 4px; margin-top:8px}
   .sec h3{font-size:13px; letter-spacing:.05em; text-transform:uppercase; color:var(--accent); margin:0 0 12px}
+  .sec h3 .pill{font-size:10px; letter-spacing:.06em; border:1px solid var(--line); color:var(--muted);
+    border-radius:999px; padding:2px 8px; margin-left:8px; text-transform:none; vertical-align:middle}
+  .sec h3 .pill.ok{color:var(--accent); border-color:color-mix(in srgb,var(--accent) 40%, transparent)}
   label{display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; font-weight:600}
   .fld{width:100%; font:inherit; font-size:14px; color:var(--ink); background:var(--bg); border:1px solid var(--line);
     border-radius:12px; padding:10px 12px;}
@@ -125,7 +153,9 @@ TEMPLATE = r"""<!DOCTYPE html>
   .btn.primary:hover{filter:brightness(1.06)}
   .btn.ghost{color:var(--muted)}
   .note{font-size:12px; color:var(--muted); margin:8px 0 0; line-height:1.5}
+  .note code{background:color-mix(in srgb,var(--muted) 16%, transparent); padding:1px 5px; border-radius:5px; font-size:11px}
   .result{font-size:13px; color:var(--accent); margin-top:8px; min-height:16px}
+  .result.err{color:var(--danger)}
   input[type=file]{font-size:13px; color:var(--muted)}
   input[type=file]::file-selector-button{font:inherit; font-weight:600; margin-right:10px; cursor:pointer;
     border:1px solid var(--line); background:var(--bg); color:var(--ink); border-radius:999px; padding:7px 14px;}
@@ -163,7 +193,7 @@ TEMPLATE = r"""<!DOCTYPE html>
       <button class="pref danger" id="del" title="Never show this quote again">🗑 Never show</button>
     </div>
   </div>
-  <div class="count"><span id="count"></span> · <a class="resetlink" id="reset">reset weights</a></div>
+  <div class="count"><span id="count"></span> · <a class="resetlink" id="reset">reset frequency</a></div>
 
   <div class="toast" id="toast"></div>
   <div class="overlay" id="overlay"></div>
@@ -173,7 +203,7 @@ TEMPLATE = r"""<!DOCTYPE html>
       <div class="drawer-head"><b>Manage quotes</b><button class="iconbtn" id="closeDrawer">✕</button></div>
 
       <div class="sec">
-        <h3 id="formTitle">Add a quote</h3>
+        <h3>Add a quote <span class="pill" id="addModePill"></span></h3>
         <label>Theme</label>
         <select class="fld" id="fTheme"></select>
         <div id="fNewWrap" style="display:none">
@@ -200,15 +230,22 @@ TEMPLATE = r"""<!DOCTYPE html>
         <div class="result" id="importCsvResult"></div>
       </div>
 
+      <div class="sec" id="syncSec">
+        <h3>Source &amp; sync <span class="pill" id="syncPill"></span></h3>
+        <div id="acctBody"></div>
+      </div>
+
       <div class="sec">
-        <h3>Backup &amp; move between devices</h3>
-        <p class="note">Preferences = your frequency weights + added quotes + hidden quotes. Export it to carry your setup to another computer.</p>
-        <div class="btnrow">
-          <button class="btn" id="exportPrefs">⭳ Export preferences</button>
-          <label class="btn" style="margin:0" for="importPrefs">⭱ Import preferences</label>
-          <input type="file" id="importPrefs" accept=".json,application/json" style="display:none">
+        <h3>Backup</h3>
+        <div id="localPrefsWrap">
+          <p class="note">Preferences = your frequency weights + added quotes + hidden quotes. Export it to carry your setup to another computer.</p>
+          <div class="btnrow">
+            <button class="btn" id="exportPrefs">⭳ Export preferences</button>
+            <label class="btn" style="margin:0" for="importPrefs">⭱ Import preferences</label>
+            <input type="file" id="importPrefs" accept=".json,application/json" style="display:none">
+          </div>
         </div>
-        <p class="note" style="margin-top:14px">Or export the full quote list (with your edits) as CSV to refresh your Google Sheet:</p>
+        <p class="note" style="margin-top:14px">Export the full quote list (with your edits) as CSV:</p>
         <div class="btnrow">
           <button class="btn" id="exportCsv">⭳ Export quotes (CSV)</button>
         </div>
@@ -223,55 +260,162 @@ TEMPLATE = r"""<!DOCTYPE html>
   </div>
 
 <script>
-const QUOTES = __PAYLOAD__;
-let THEMES = __THEMES__;
-QUOTES.forEach((q,i)=>q.id=i);
+const EMBED_QUOTES = __PAYLOAD__;
+const EMBED_THEMES = __THEMES__;
+const CFG = window.QE_CONFIG || {};
+const SHEET_API = String(CFG.sheetApi || '').trim();
+const SHEET_KEY = String(CFG.sheetKey || '');
+const SHEET_CONFIGURED = !!SHEET_API;
 const el = id => document.getElementById(id);
-
-// ---------- persisted state ----------
-const PKEY='quoteEngine.prefs.v1';
-let weights={}, deleted=new Set(), CUSTOM=[], nextCustomId=1;
-function loadPrefs(){
-  try{ const raw=localStorage.getItem(PKEY);
-    if(raw){ const o=JSON.parse(raw)||{};
-      weights=o.weights||{}; deleted=new Set((o.deleted||[]).map(String));
-      CUSTOM=Array.isArray(o.custom)?o.custom:[]; nextCustomId=o.nextCustomId||1; return; } }catch(e){}
-  try{ const old=localStorage.getItem('quoteEngine.weights.v1'); if(old) weights=JSON.parse(old)||{}; }catch(e){}
-}
-function savePrefs(){ try{ localStorage.setItem(PKEY, JSON.stringify(
-  {v:2, weights, deleted:[...deleted], custom:CUSTOM, nextCustomId})); }catch(e){} }
-loadPrefs();
-
-const qid = q => String(q.id);
-const W = q => { const w=weights[qid(q)]; return w==null?1:w; };
-const MOREF=1.7, LESSF=0.58, WMAX=12, WMIN=0.06;
-
-function activeQuotes(){ return QUOTES.concat(CUSTOM).filter(q=>!deleted.has(qid(q))); }
-function allThemes(){
-  const set=new Set(THEMES);
-  CUSTOM.forEach(q=>{ if(!deleted.has(qid(q))) set.add(q.t); });
-  // keep base order, then any new themes alphabetically
-  const extra=[...set].filter(t=>!THEMES.includes(t)).sort();
-  return THEMES.concat(extra);
-}
-
-let pool=[], current=null;
-
-// ---------- theme selects ----------
-function refreshThemes(){
-  const list=allThemes();
-  const fv=el('filter').value;
-  el('filter').innerHTML='<option value="__all">All themes</option>'+
-    list.map(t=>'<option>'+esc(t)+'</option>').join('');
-  el('filter').value=list.includes(fv)||fv==='__all'?fv:'__all';
-  const tv=el('fTheme').value;
-  el('fTheme').innerHTML=list.map(t=>'<option>'+esc(t)+'</option>').join('')+
-    '<option value="__new">➕ New theme…</option>';
-  if(tv) el('fTheme').value=tv;
-}
 function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-// ---------- fit ----------
+// ---------- tuning ----------
+const MOREF=1.7, LESSF=0.58, WMAX=12, WMIN=0.06;
+
+// ---------- tag <-> frequency model (shared vocabulary with the Sheet) ----------
+// Frequency tags map to weights; the "exclude" family hides a quote.
+const FREQ_W = {rarely:0.2, less:0.5, normal:1, more:2, often:4};
+const FREQ_TAGS = Object.keys(FREQ_W);
+const EXCL_TAGS = ['exclude','hide','off','mute','skip'];
+function splitTags(s){ return String(s||'').split(/[,\s]+/).map(x=>x.trim()).filter(Boolean); }
+function parseTags(str){
+  let excluded=false, weight=1, free=[];
+  for(const raw of splitTags(str)){ const t=raw.toLowerCase();
+    if(EXCL_TAGS.includes(t)) excluded=true;
+    else if(FREQ_W[t]!=null) weight=FREQ_W[t];
+    else free.push(raw);
+  }
+  return {excluded, weight, free};
+}
+function levelForWeight(w){ // nearest frequency tag on a log scale
+  let best='normal', bd=Infinity;
+  for(const tag of FREQ_TAGS){ const d=Math.abs(Math.log(w)-Math.log(FREQ_W[tag])); if(d<bd){ bd=d; best=tag; } }
+  return best;
+}
+
+// ---------- in-memory model ----------
+// each item: {id, q, a, s, t, weight, hidden, free:[tags]}
+let ITEMS=[], THEMES=[], pool=[], current=null;
+const byId = id => ITEMS.find(it=>String(it.id)===String(id));
+const norm = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+function computeThemes(){
+  const set=new Set(); ITEMS.forEach(it=>{ if(it.t) set.add(it.t); });
+  const base=EMBED_THEMES.filter(t=>set.has(t));
+  const extra=[...set].filter(t=>!EMBED_THEMES.includes(t)).sort();
+  THEMES=base.concat(extra);
+}
+function activeQuotes(){ return ITEMS.filter(it=>!it.hidden); }
+function hiddenCount(){ return ITEMS.filter(it=>it.hidden).length; }
+
+// =========================================================
+//  Google Sheet transport (Apps Script web app)
+// =========================================================
+async function sheetGet(){
+  const res=await fetch(SHEET_API, {method:'GET'});
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  const d=await res.json();
+  if(d && d.error) throw new Error(d.error);
+  return d;
+}
+// POST as text/plain so the browser skips the CORS preflight Apps Script can't answer.
+async function sheetPost(payload){
+  if(SHEET_KEY) payload.key=SHEET_KEY;
+  const res=await fetch(SHEET_API, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(payload)});
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  const d=await res.json().catch(()=>({}));
+  if(d && d.error) throw new Error(d.error);
+  return d;
+}
+function rowToItem(r){
+  const p=parseTags(r.tags);
+  return {id:String(r.id), q:r.quote, a:r.author||'', s:r.source||'', t:r.theme||'', weight:p.weight, hidden:p.excluded, free:p.free};
+}
+
+// =========================================================
+//  Stores
+// =========================================================
+// -- Local (browser localStorage) --
+const PKEY='quoteEngine.prefs.v1';
+let L={weights:{},deleted:new Set(),custom:[],nextCustomId:1};
+function localLoadPrefs(){
+  try{ const raw=localStorage.getItem(PKEY);
+    if(raw){ const o=JSON.parse(raw)||{}; L.weights=o.weights||{}; L.deleted=new Set((o.deleted||[]).map(String));
+      L.custom=Array.isArray(o.custom)?o.custom:[]; L.nextCustomId=o.nextCustomId||1; return; } }catch(e){}
+  try{ const old=localStorage.getItem('quoteEngine.weights.v1'); if(old) L.weights=JSON.parse(old)||{}; }catch(e){}
+}
+function localSave(){ try{ localStorage.setItem(PKEY, JSON.stringify(
+  {v:2, weights:L.weights, deleted:[...L.deleted], custom:L.custom, nextCustomId:L.nextCustomId})); }catch(e){} }
+
+const LocalStore = {
+  sheet:false,
+  async load(){
+    localLoadPrefs();
+    const mk=(o,id)=>({id:String(id), q:o.q, a:o.a, s:o.s, t:o.t,
+      weight:(L.weights[String(id)]!=null?L.weights[String(id)]:1), hidden:L.deleted.has(String(id)), free:[]});
+    const base=EMBED_QUOTES.map((o,i)=>mk(o,i));
+    const cust=L.custom.map(o=>mk(o,o.id));
+    ITEMS=base.concat(cust); computeThemes();
+  },
+  async setWeight(id,w){ const it=byId(id); it.weight=w;
+    if(Math.abs(w-1)<0.04) delete L.weights[id]; else L.weights[id]=+w.toFixed(3); localSave(); },
+  async setHidden(id,h){ const it=byId(id); it.hidden=h; h?L.deleted.add(String(id)):L.deleted.delete(String(id)); localSave(); },
+  async resetWeights(){ L.weights={}; ITEMS.forEach(it=>it.weight=1); localSave(); },
+  async restoreAll(){ L.deleted.clear(); ITEMS.forEach(it=>it.hidden=false); localSave(); },
+  async add({q,a,s,t}){ const id='c'+(L.nextCustomId++); L.custom.push({id,q,a,s:s||'—',t});
+    const it={id,q,a,s:s||'—',t,weight:1,hidden:false,free:[]}; ITEMS.push(it); localSave(); return it; },
+  async addMany(list){ const out=[]; for(const x of list) out.push(await this.add(x)); return out; },
+  async update(id,{q,a,s,t}){
+    const it=byId(id); const cust=L.custom.find(c=>String(c.id)===String(id));
+    if(cust){ cust.q=q; cust.a=a; cust.s=s||'—'; cust.t=t; Object.assign(it,{q,a,s:s||'—',t}); localSave(); return it; }
+    const w=L.weights[String(id)]; await this.setHidden(id,true);
+    const ni=await this.add({q,a,s,t}); if(w!=null){ L.weights[ni.id]=w; ni.weight=w; localSave(); }
+    return ni;
+  }
+};
+
+// -- Sheet (Google Sheet via Apps Script) --
+const SheetStore = {
+  sheet:true,
+  async load(){
+    const d=await sheetGet();
+    ITEMS=(d.quotes||[]).map(rowToItem); computeThemes();
+  },
+  async setWeight(id,w){ const it=byId(id), old=it.weight; it.weight=w;
+    try{ await sheetPost({action:'setFreq', id, level:levelForWeight(w)}); }
+    catch(e){ it.weight=old; throw e; } },
+  async setHidden(id,h){ const it=byId(id), old=it.hidden; it.hidden=h;
+    try{ await sheetPost({action:'setExcluded', id, excluded:h}); }
+    catch(e){ it.hidden=old; throw e; } },
+  async resetWeights(){ await sheetPost({action:'resetFreq'}); ITEMS.forEach(it=>it.weight=1); },
+  async restoreAll(){ await sheetPost({action:'restoreAll'}); ITEMS.forEach(it=>it.hidden=false); },
+  async add(x){ return (await this.addMany([x]))[0]; },
+  async addMany(list){
+    const rows=list.map(x=>({quote:x.q, author:x.a||'', source:x.s||'', theme:x.t, tags:x.tags||''}));
+    const d=await sheetPost({action:'add', rows});
+    const ids=d.ids||[]; const out=[];
+    list.forEach((x,i)=>{ const it={id:String(ids[i]!=null?ids[i]:('tmp'+i)), q:x.q, a:x.a||'', s:x.s||'', t:x.t, weight:1, hidden:false, free:[]}; ITEMS.push(it); out.push(it); });
+    return out;
+  },
+  async update(id,{q,a,s,t}){
+    await sheetPost({action:'update', id, quote:q, author:a||'', source:s||'', theme:t});
+    const it=byId(id); Object.assign(it,{q,a,s:s||'',t}); return it;
+  }
+};
+
+let store = SHEET_CONFIGURED ? SheetStore : LocalStore;
+
+// =========================================================
+//  UI
+// =========================================================
+function refreshThemes(){
+  const fv=el('filter').value;
+  el('filter').innerHTML='<option value="__all">All themes</option>'+THEMES.map(t=>'<option>'+esc(t)+'</option>').join('');
+  el('filter').value=THEMES.includes(fv)||fv==='__all'?fv:'__all';
+  const tv=el('fTheme').value;
+  el('fTheme').innerHTML=THEMES.map(t=>'<option>'+esc(t)+'</option>').join('')+'<option value="__new">➕ New theme…</option>';
+  if(tv) el('fTheme').value=tv;
+}
+
 function fitQuote(){
   const qt=el('qtext'); qt.style.overflow='hidden';
   let size=Math.min(30, Math.max(19, window.innerWidth*0.03));
@@ -283,19 +427,19 @@ function fitQuote(){
 }
 let _rt; window.addEventListener('resize', ()=>{ clearTimeout(_rt); _rt=setTimeout(fitQuote,120); });
 
-// ---------- selection ----------
 function weightedPick(){
   if(pool.length===1) return pool[0];
-  let total=0; for(const q of pool){ let w=W(q); if(q===current) w*=0.02; total+=w; }
+  let total=0; for(const it of pool){ let w=it.weight; if(it===current) w*=0.02; total+=w; }
   let r=Math.random()*total;
-  for(const q of pool){ let w=W(q); if(q===current) w*=0.02; r-=w; if(r<=0) return q; }
+  for(const it of pool){ let w=it.weight; if(it===current) w*=0.02; r-=w; if(r<=0) return it; }
   return pool[pool.length-1];
 }
 function freqInfo(w){
   if(w<=0.2) return ['Rarely','r']; if(w<=0.62) return ['Less often','l'];
   if(w<1.7) return ['Normal','n']; if(w<4) return ['More often','m']; return ['Often','o'];
 }
-function renderFreq(){ if(!current) return; const [lab,lvl]=freqInfo(W(current)); const f=el('freq'); f.textContent=lab; f.dataset.level=lvl; }
+function renderFreq(){ if(!current) return; const [lab,lvl]=freqInfo(current.weight); const f=el('freq'); f.textContent=lab; f.dataset.level=lvl; }
+function pulseFreq(){ const f=el('freq'); f.style.transform='scale(1.14)'; setTimeout(()=>f.style.transform='',160); }
 function setCardEnabled(on){ ['more','less','edit','del'].forEach(id=>el(id).disabled=!on); }
 
 function show(){
@@ -312,78 +456,69 @@ function show(){
   const card=el('card'); card.classList.remove('anim'); void card.offsetWidth; card.classList.add('anim');
   fitQuote();
 }
-function adjust(factor){
-  if(!current) return;
-  let w=W(current)*factor; w=Math.max(WMIN,Math.min(WMAX,w));
-  if(Math.abs(w-1)<0.04) delete weights[qid(current)]; else weights[qid(current)]=+w.toFixed(3);
-  savePrefs(); renderFreq();
-  const f=el('freq'); f.style.transform='scale(1.14)'; setTimeout(()=>f.style.transform='',160);
+let busy=false;
+async function adjust(factor){
+  if(!current || busy) return;
+  let w=Math.max(WMIN,Math.min(WMAX,current.weight*factor));
+  busy=true; setCardEnabled(false);
+  try{ await store.setWeight(current.id,w); renderFreq(); pulseFreq(); }
+  catch(err){ toast(saveErr(err)); }
+  finally{ busy=false; setCardEnabled(true); }
 }
 function applyFilter(){
   const v=el('filter').value;
   const base=activeQuotes();
-  pool=(v==='__all')?base:base.filter(q=>q.t===v);
-  el('count').textContent=pool.length+' quotes'+(v==='__all'?' · '+allThemes().length+' themes':' in this theme');
-  el('hiddenCount').textContent=deleted.size;
+  pool=(v==='__all')?base:base.filter(it=>it.t===v);
+  el('count').textContent=pool.length+' quotes'+(v==='__all'?' · '+THEMES.length+' themes':' in this theme')+(store.sheet?' · ☁ Google Sheet':'');
+  el('hiddenCount').textContent=hiddenCount();
   current=null; show();
 }
 
-// ---------- toast ----------
 function toast(msg, undoFn){
   const t=el('toast'); t.innerHTML=''; const s=document.createElement('span'); s.textContent=msg; t.appendChild(s);
   if(undoFn){ const a=document.createElement('a'); a.className='undo'; a.textContent='Undo';
     a.onclick=()=>{ undoFn(); t.classList.remove('show'); }; t.appendChild(a); }
   t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),4500);
 }
+function saveErr(err){ return 'Could not save to the Sheet'+(store.sheet?'':'')+((err&&err.message)?' ('+err.message+')':'')+'.'; }
 
-// ---------- delete ----------
-function delCurrent(){
-  if(!current) return; const id=qid(current);
-  deleted.add(id); savePrefs(); applyFilter();
-  toast('Quote hidden.', ()=>{ deleted.delete(id); savePrefs(); applyFilter(); });
+async function delCurrent(){
+  if(!current || busy) return; const id=current.id;
+  busy=true;
+  try{ await store.setHidden(id,true); applyFilter();
+    toast('Quote hidden.', async ()=>{ try{ await store.setHidden(id,false); applyFilter(); }catch(e){ toast('Could not restore.'); } });
+  }catch(err){ toast(saveErr(err)); }
+  finally{ busy=false; }
 }
 
 // ---------- add / edit ----------
 let editingId=null;
-function openDrawer(){ el('drawer').classList.add('open'); el('overlay').classList.add('open'); }
+function openDrawer(){ el('drawer').classList.add('open'); el('overlay').classList.add('open'); renderAccount(); }
 function closeDrawer(){ el('drawer').classList.remove('open'); el('overlay').classList.remove('open'); }
 function resetForm(){
-  editingId=null; el('formTitle').textContent='Add a quote';
-  el('fAuthor').value=''; el('fSource').value=''; el('fQuote').value='';
+  editingId=null; el('fAuthor').value=''; el('fSource').value=''; el('fQuote').value='';
   el('fNewTheme').value=''; el('fNewWrap').style.display='none';
-  el('fTheme').value=allThemes()[0]; el('cancelEdit').style.display='none'; el('formResult').textContent='';
+  if(THEMES.length) el('fTheme').value=THEMES[0];
+  el('cancelEdit').style.display='none'; el('formResult').textContent=''; el('formResult').className='result';
 }
 function loadIntoForm(q){
-  editingId=q.id; el('formTitle').textContent='Editing quote';
-  refreshThemes();
-  if(allThemes().includes(q.t)){ el('fTheme').value=q.t; el('fNewWrap').style.display='none'; }
+  editingId=q.id; refreshThemes();
+  if(THEMES.includes(q.t)){ el('fTheme').value=q.t; el('fNewWrap').style.display='none'; }
   el('fAuthor').value=q.a||''; el('fSource').value=q.s||''; el('fQuote').value=q.q||'';
-  el('cancelEdit').style.display=''; el('formResult').textContent='';
+  el('cancelEdit').style.display=''; el('formResult').textContent=''; el('formResult').className='result';
 }
-function themeFromForm(){
-  const v=el('fTheme').value;
-  return v==='__new' ? el('fNewTheme').value.trim() : v;
-}
-function saveQuote(){
+function themeFromForm(){ const v=el('fTheme').value; return v==='__new' ? el('fNewTheme').value.trim() : v; }
+async function saveQuote(){
   const q=el('fQuote').value.trim(), t=themeFromForm();
   const a=el('fAuthor').value.trim(), s=el('fSource').value.trim();
-  if(!q){ el('formResult').textContent='Please enter the quote text.'; return; }
-  if(!t){ el('formResult').textContent='Please choose or name a theme.'; return; }
-  if(editingId!=null){
-    const cust=CUSTOM.find(c=>String(c.id)===String(editingId));
-    if(cust){ cust.q=q; cust.a=a; cust.s=s||'—'; cust.t=t; }
-    else { // built-in: hide original, add replacement carrying its weight
-      const w=weights[String(editingId)];
-      deleted.add(String(editingId));
-      const id='c'+(nextCustomId++); CUSTOM.push({id,q,a,s:s||'—',t});
-      if(w!=null) weights[id]=w;
-    }
-    savePrefs(); refreshThemes(); applyFilter(); toast('Quote updated.'); resetForm();
-  } else {
-    const id='c'+(nextCustomId++); CUSTOM.push({id,q,a,s:s||'—',t});
-    savePrefs(); refreshThemes(); applyFilter(); toast('Quote added.');
-    el('fQuote').value=''; el('formResult').textContent='Added ✓ — add another or close.';
-  }
+  const R=el('formResult'); R.className='result';
+  if(!q){ R.textContent='Please enter the quote text.'; return; }
+  if(!t){ R.textContent='Please choose or name a theme.'; return; }
+  R.textContent='Saving…';
+  try{
+    if(editingId!=null){ await store.update(editingId,{q,a,s,t}); refreshThemes(); applyFilter(); toast('Quote updated.'); resetForm(); }
+    else { await store.add({q,a,s,t}); refreshThemes(); applyFilter(); toast('Quote added.'); el('fQuote').value=''; R.textContent='Added ✓ — add another or close.'; }
+  }catch(err){ R.className='result err'; R.textContent=saveErr(err); }
 }
 
 // ---------- CSV ----------
@@ -397,26 +532,27 @@ function parseCSV(text){
   if(f.length||row.length){ row.push(f); rows.push(row); }
   return rows;
 }
-function importCSV(text){
+async function importCSV(text){
+  const R=el('importCsvResult'); R.className='result';
   const rows=parseCSV(text).filter(r=>r.length && r.some(c=>c.trim()!==''));
-  if(!rows.length){ el('importCsvResult').textContent='No rows found.'; return; }
+  if(!rows.length){ R.textContent='No rows found.'; return; }
   const head=rows[0].map(h=>h.trim().toLowerCase());
   const iQ=head.findIndex(h=>h.includes('quote')), iA=head.findIndex(h=>h.includes('author')),
         iS=head.findIndex(h=>h.includes('source')), iT=head.findIndex(h=>h.includes('theme'));
-  if(iQ<0||iT<0){ el('importCsvResult').textContent='Need at least Quote and Theme columns.'; return; }
-  const norm=s=>s.toLowerCase().replace(/[^a-z0-9]/g,'');
-  const seen=new Set(activeQuotes().map(q=>norm(q.q)));
-  let added=0,skipped=0;
+  if(iQ<0||iT<0){ R.className='result err'; R.textContent='Need at least Quote and Theme columns.'; return; }
+  const seen=new Set(ITEMS.map(it=>norm(it.q)));
+  const toAdd=[]; let skipped=0;
   for(let r=1;r<rows.length;r++){
-    const row=rows[r]; const q=(row[iQ]||'').trim(); if(!q) continue;
-    const key=norm(q); if(seen.has(key)){ skipped++; continue; }
-    seen.add(key);
-    CUSTOM.push({id:'c'+(nextCustomId++), q, a:(iA>=0?row[iA]:'').trim()||'—',
-      s:(iS>=0?row[iS]:'').trim()||'—', t:(row[iT]||'').trim()||'Uncategorized'});
-    added++;
+    const row=rows[r]; const q=(row[iQ]||'').trim(); if(!q){ continue; }
+    const key=norm(q); if(seen.has(key)){ skipped++; continue; } seen.add(key);
+    toAdd.push({q, a:(iA>=0?row[iA]:'').trim()||'—', s:(iS>=0?row[iS]:'').trim()||'—', t:(row[iT]||'').trim()||'Uncategorized'});
   }
-  savePrefs(); refreshThemes(); applyFilter();
-  el('importCsvResult').textContent='Added '+added+' quote(s)'+(skipped?', skipped '+skipped+' duplicate(s).':'.');
+  if(!toAdd.length){ R.textContent='No new quotes'+(skipped?' — skipped '+skipped+' duplicate(s).':'.'); return; }
+  R.textContent='Importing '+toAdd.length+'…';
+  try{
+    await store.addMany(toAdd); refreshThemes(); applyFilter();
+    R.textContent='Added '+toAdd.length+' quote(s)'+(skipped?', skipped '+skipped+' duplicate(s).':'.');
+  }catch(err){ R.className='result err'; R.textContent=saveErr(err); }
 }
 
 // ---------- downloads ----------
@@ -428,28 +564,48 @@ function download(name, text, type){
 function csvCell(s){ s=String(s==null?'':s); return /[",\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }
 function exportCSV(){
   const list=activeQuotes(); const lines=['Quote,Author,Source,Theme'];
-  for(const q of list) lines.push([q.q,q.a,q.s,q.t].map(csvCell).join(','));
+  for(const it of list) lines.push([it.q,it.a,it.s,it.t].map(csvCell).join(','));
   download('quotes.csv','﻿'+lines.join('\r\n'),'text/csv;charset=utf-8');
-  el('prefsResult').textContent='Exported '+list.length+' quotes.';
+  el('prefsResult').className='result'; el('prefsResult').textContent='Exported '+list.length+' quotes.';
 }
 function exportPrefs(){
-  download('quote-engine-prefs.json', JSON.stringify({v:2,weights,deleted:[...deleted],custom:CUSTOM,nextCustomId}),
+  download('quote-engine-prefs.json', JSON.stringify({v:2,weights:L.weights,deleted:[...L.deleted],custom:L.custom,nextCustomId:L.nextCustomId}),
     'application/json');
-  el('prefsResult').textContent='Preferences exported.';
+  el('prefsResult').className='result'; el('prefsResult').textContent='Preferences exported.';
 }
 function importPrefsObj(o){
-  if(!o||typeof o!=='object'){ el('prefsResult').textContent='Invalid file.'; return; }
-  if(o.weights) Object.assign(weights,o.weights);
-  if(Array.isArray(o.deleted)) o.deleted.forEach(d=>deleted.add(String(d)));
-  if(Array.isArray(o.custom)){ const have=new Set(CUSTOM.map(c=>String(c.id)));
-    o.custom.forEach(c=>{ if(!have.has(String(c.id))) CUSTOM.push(c); }); }
-  if(o.nextCustomId) nextCustomId=Math.max(nextCustomId,o.nextCustomId);
-  savePrefs(); refreshThemes(); applyFilter();
-  el('prefsResult').textContent='Preferences imported.';
+  if(!o||typeof o!=='object'){ el('prefsResult').className='result err'; el('prefsResult').textContent='Invalid file.'; return; }
+  if(o.weights) Object.assign(L.weights,o.weights);
+  if(Array.isArray(o.deleted)) o.deleted.forEach(d=>L.deleted.add(String(d)));
+  if(Array.isArray(o.custom)){ const have=new Set(L.custom.map(c=>String(c.id)));
+    o.custom.forEach(c=>{ if(!have.has(String(c.id))) L.custom.push(c); }); }
+  if(o.nextCustomId) L.nextCustomId=Math.max(L.nextCustomId,o.nextCustomId);
+  localSave(); store.load().then(()=>{ refreshThemes(); applyFilter(); });
+  el('prefsResult').className='result'; el('prefsResult').textContent='Preferences imported.';
 }
 function readFile(input, cb){
   const f=input.files[0]; if(!f) return; const r=new FileReader();
   r.onload=()=>{ cb(r.result); input.value=''; }; r.readAsText(f);
+}
+
+// ---------- source / sync panel ----------
+function renderAccount(){
+  const body=el('acctBody'), pill=el('syncPill'), addPill=el('addModePill');
+  el('localPrefsWrap').style.display = store.sheet ? 'none' : '';
+  if(store.sheet){
+    pill.className='pill ok'; pill.textContent='Google Sheet';
+    addPill.className='pill ok'; addPill.textContent='saves to Sheet';
+    body.innerHTML='<p class="note">Quotes come from your <b>Google Sheet</b> <span class="synced">☁</span>. Less/More, Never-show, edits, and additions write straight back to it, and editing the Sheet by hand shows up here on reload.</p>'+
+      '<p class="note">Tag a row (the <code>Tags</code> column) to steer it: <code>exclude</code> to hide, <code>more</code>/<code>often</code> to surface it, <code>less</code>/<code>rarely</code> to bury it.</p>'+
+      '<div class="btnrow"><button class="btn" id="reloadSheet">↻ Reload from Sheet</button></div>';
+    el('reloadSheet').onclick=async()=>{ toast('Reloading…'); try{ await store.load(); refreshThemes(); applyFilter(); toast('Reloaded from Sheet.'); }catch(e){ toast('Reload failed.'); } };
+    return;
+  }
+  pill.className='pill'; pill.textContent = SHEET_CONFIGURED ? 'Sheet unreachable' : 'local';
+  addPill.className='pill'; addPill.textContent='this browser';
+  body.innerHTML = SHEET_CONFIGURED
+    ? '<p class="note">A Google Sheet is configured but wasn\'t reachable, so the app is running in <b>local mode</b> (this browser only). Reload to retry.</p>'
+    : '<p class="note">Running in <b>local mode</b> — changes save in this browser only. Connect a Google Sheet (see the README) to make the Sheet the source and sync your changes.</p>';
 }
 
 // ---------- events ----------
@@ -460,7 +616,8 @@ el('edit').addEventListener('click', ()=>{ if(current){ loadIntoForm(current); o
 el('del').addEventListener('click', delCurrent);
 el('filter').addEventListener('change', applyFilter);
 el('mode').addEventListener('click', ()=>{ const h=document.documentElement; h.dataset.mode=h.dataset.mode==='dark'?'light':'dark'; });
-el('reset').addEventListener('click', ()=>{ weights={}; savePrefs(); renderFreq(); toast('Frequency weights reset.'); });
+el('reset').addEventListener('click', async ()=>{
+  try{ await store.resetWeights(); renderFreq(); toast('Frequency reset.'); }catch(err){ toast(saveErr(err)); } });
 
 el('manage').addEventListener('click', ()=>{ resetForm(); openDrawer(); });
 el('closeDrawer').addEventListener('click', closeDrawer);
@@ -471,8 +628,9 @@ el('cancelEdit').addEventListener('click', resetForm);
 el('importCsv').addEventListener('change', e=>readFile(e.target, importCSV));
 el('exportPrefs').addEventListener('click', exportPrefs);
 el('exportCsv').addEventListener('click', exportCSV);
-el('importPrefs').addEventListener('change', e=>readFile(e.target, txt=>{ try{ importPrefsObj(JSON.parse(txt)); }catch(err){ el('prefsResult').textContent='Could not read that file.'; } }));
-el('restoreAll').addEventListener('click', ()=>{ deleted.clear(); savePrefs(); refreshThemes(); applyFilter(); toast('Hidden quotes restored.'); });
+el('importPrefs').addEventListener('change', e=>readFile(e.target, txt=>{ try{ importPrefsObj(JSON.parse(txt)); }catch(err){ el('prefsResult').className='result err'; el('prefsResult').textContent='Could not read that file.'; } }));
+el('restoreAll').addEventListener('click', async ()=>{
+  try{ await store.restoreAll(); refreshThemes(); applyFilter(); toast('Hidden quotes restored.'); }catch(err){ toast(saveErr(err)); } });
 
 document.addEventListener('keydown', e=>{
   if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
@@ -482,13 +640,27 @@ document.addEventListener('keydown', e=>{
   else if(e.code==='ArrowDown'){ e.preventDefault(); adjust(LESSF); }
 });
 
-refreshThemes();
-applyFilter();
+// ---------- boot ----------
+async function init(){
+  renderAccount();
+  el('count').textContent='Loading…';
+  try{ await store.load(); }
+  catch(err){
+    if(store.sheet){ store=LocalStore; try{ await store.load(); }catch(e){} toast('Google Sheet unavailable — using local mode.'); }
+  }
+  renderAccount(); refreshThemes(); applyFilter();
+}
+init();
 </script>
 </body>
 </html>"""
 
-out = TEMPLATE.replace("__PAYLOAD__", payload).replace("__THEMES__", themes_json)
+out = (TEMPLATE
+       .replace("__PAYLOAD__", payload)
+       .replace("__THEMES__", themes_json)
+       .replace("__SHEET_API__", SHEET_API)
+       .replace("__SHEET_KEY__", SHEET_KEY))
 with open(OUT_PATH, "w", encoding="utf-8") as f:
     f.write(out)
-print("Wrote", OUT_PATH, "-", len(out), "bytes;", len(quotes), "quotes;", len(themes), "themes")
+mode = "Google Sheet (%s)" % SHEET_API if SHEET_API else "local (no Sheet configured)"
+print("Wrote", OUT_PATH, "-", len(out), "bytes;", len(quotes), "quotes;", len(themes), "themes; mode:", mode)
