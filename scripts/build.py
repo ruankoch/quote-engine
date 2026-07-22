@@ -23,8 +23,22 @@ OUT_PATH = os.path.join(ROOT, "index.html")
 
 with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
     rows = list(csv.DictReader(f))
-quotes = [{"q": r["Quote"], "a": r.get("Author", "") or "", "s": r.get("Source", "") or "",
-           "t": r.get("Theme", "") or ""} for r in rows if (r.get("Quote") or "").strip()]
+
+
+def col(row, name):
+    """Case-insensitive column lookup, so 'Tags'/'tags' etc. all work."""
+    for k in row.keys():
+        if k and k.strip().lower() == name:
+            return row.get(k) or ""
+    return ""
+
+
+# 'g' = the Tags cell; baked in so the offline/local copy honors exclude + frequency
+# tags (used when the live Google Sheet can't be reached, e.g. on a network that
+# blocks Google). Live Sheet mode reads tags fresh and ignores this.
+quotes = [{"q": col(r, "quote"), "a": col(r, "author"), "s": col(r, "source"),
+           "t": col(r, "theme"), "g": col(r, "tags")}
+          for r in rows if col(r, "quote").strip()]
 themes = sorted(set(q["t"] for q in quotes if q["t"]))
 payload = json.dumps(quotes, ensure_ascii=False).replace("</", "<\\/")
 themes_json = json.dumps(themes, ensure_ascii=False)
@@ -357,8 +371,10 @@ const LocalStore = {
   sheet:false,
   async load(){
     localLoadPrefs();
-    const mk=(o,id)=>({id:String(id), q:o.q, a:o.a, s:o.s, t:o.t,
-      weight:(L.weights[String(id)]!=null?L.weights[String(id)]:1), hidden:L.deleted.has(String(id)), free:[]});
+    // Seed weight/hidden from any baked-in Tags (o.g); localStorage tweaks override.
+    const mk=(o,id)=>{ const p=parseTags(o.g); return {id:String(id), q:o.q, a:o.a, s:o.s, t:o.t,
+      weight:(L.weights[String(id)]!=null?L.weights[String(id)]:p.weight),
+      hidden:(L.deleted.has(String(id))||p.excluded), free:p.free}; };
     const base=EMBED_QUOTES.map((o,i)=>mk(o,i));
     const cust=L.custom.map(o=>mk(o,o.id));
     ITEMS=base.concat(cust); computeThemes();

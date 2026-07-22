@@ -1,0 +1,53 @@
+name: Sync quotes from Google Sheet
+
+# Mirrors the Google Sheet into the repo (data/quotes.csv + a rebuilt index.html)
+# so the deployed page is a fresh, Google-free copy — usable on networks that
+# block Google (e.g. workplace IT). Runs on GitHub's servers, where Google is
+# reachable, then the push triggers the Pages deploy.
+
+on:
+  schedule:
+    - cron: '17 * * * *'   # hourly (at :17); change or add lines to taste
+  workflow_dispatch:        # ...or run it on demand from the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-quotes
+  cancel-in-progress: true
+
+env:
+  # The Apps Script /exec URL (same one baked into index.html). Update here if it changes.
+  QE_SHEET_API: "https://script.google.com/macros/s/AKfycbwE05T0PCzOsiVyhuXWtWsuB1Ad51-5sD5RrbQpaOR1NUfju3tnXosbF-54tN0ZQVMoVA/exec"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Pull latest quotes (with tags) from the Sheet
+        run: python3 scripts/sync_from_sheet.py
+
+      - name: Rebuild index.html (keeps the live Sheet URL baked in)
+        run: python3 scripts/build.py
+
+      - name: Commit and push if anything changed
+        run: |
+          if [ -n "$(git status --porcelain data/quotes.csv index.html)" ]; then
+            git config user.name  "quote-engine-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/quotes.csv index.html
+            git commit -m "Sync quotes from Google Sheet"
+            git push
+            echo "Pushed updated quotes."
+          else
+            echo "No changes — Sheet already in sync."
+          fi
