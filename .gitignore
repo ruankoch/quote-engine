@@ -1,0 +1,14 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local exports from the app (keep these out of the repo)
+quote-engine-prefs.json
+quotes-export*.csv
