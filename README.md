@@ -91,6 +91,26 @@ For a personal tool that's usually fine. For a light deterrent you can set `WRIT
 page it only stops casual pokes, not a determined person. Real protection would mean adding
 Google sign-in (heavier); ask if you want that.
 
+## Using it where Google is blocked (e.g. at work)
+
+The app reads the Sheet from the browser via `script.google.com`. On a network that blocks
+Google (many workplaces), that request fails and the app falls back to **local mode** — it still
+shows every quote (they're baked into `index.html`), just without live Sheet sync.
+
+To keep that offline copy **current and curated** without any Google call from the browser, a
+scheduled Action mirrors the Sheet into the repo:
+
+- [`.github/workflows/sync-quotes.yml`](.github/workflows/sync-quotes.yml) runs hourly on GitHub's
+  servers (where Google *is* reachable), pulls the Sheet via
+  [`scripts/sync_from_sheet.py`](scripts/sync_from_sheet.py), rewrites `data/quotes.csv` **with its
+  Tags**, rebuilds `index.html`, and pushes — which redeploys Pages.
+- `build.py` bakes those tags into the page, so the offline copy honors `exclude` and the
+  frequency tags too. Curate in the Sheet wherever Google works; the blocked network just reads
+  the fresh mirror from GitHub.
+
+Run it on demand any time from the repo's **Actions ▸ Sync quotes from Google Sheet ▸ Run workflow**,
+and change the `cron:` line to adjust how often it syncs.
+
 ## Adding quotes
 
 - **In the app**: **☰ Manage ▸ Add a quote**, or bulk-import a CSV in the same panel. In Sheet
@@ -112,10 +132,13 @@ quote-engine/
 ├── data/
 │   └── quotes.csv                # 2,000 quotes — import this into your Sheet
 ├── scripts/
-│   └── build.py                  # regenerates index.html (bakes in the Sheet URL)
+│   ├── build.py                  # regenerates index.html (bakes in the Sheet URL + tags)
+│   └── sync_from_sheet.py        # pulls the Sheet into data/quotes.csv (used by the sync Action)
 ├── google-apps-script/
 │   └── Code.gs                   # the Sheet's read/write web-app backend
-├── .github/workflows/deploy.yml  # GitHub Pages auto-deploy
+├── .github/workflows/
+│   ├── deploy.yml                # GitHub Pages auto-deploy on push to main
+│   └── sync-quotes.yml           # hourly Sheet → repo mirror (for Google-blocked networks)
 ├── .gitignore
 ├── LICENSE
 └── README.md
