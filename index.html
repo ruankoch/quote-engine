@@ -588,7 +588,13 @@ function readFile(input, cb){
 // ---------- source / sync panel ----------
 function renderAccount(){
   const body=el('acctBody'), pill=el('syncPill'), addPill=el('addModePill');
-  el('localPrefsWrap').style.display = store.sheet ? 'none' : '';
+  el('localPrefsWrap').style.display = (store.sheet||syncing) ? 'none' : '';
+  if(syncing){
+    pill.className='pill'; pill.textContent='connecting…';
+    addPill.className='pill'; addPill.textContent='connecting…';
+    body.innerHTML='<p class="note">Showing a quote from the built-in copy while it connects to your <b>Google Sheet</b>…</p>';
+    return;
+  }
   if(store.sheet){
     pill.className='pill ok'; pill.textContent='Google Sheet';
     addPill.className='pill ok'; addPill.textContent='saves to Sheet';
@@ -642,14 +648,35 @@ document.addEventListener('keydown', e=>{
 });
 
 // ---------- boot ----------
-async function init(){
+let syncing=false;
+// Once the live Sheet has loaded, swap it in without flashing: keep the quote
+// already on screen if it still exists in the Sheet (matched by text).
+function afterSheetLoad(){
+  store=SheetStore; syncing=false;
+  refreshThemes();
+  const keep = current && ITEMS.find(it=>!it.hidden && norm(it.q)===norm(current.q));
+  const v=el('filter').value; const base=activeQuotes();
+  pool=(v==='__all')?base:base.filter(it=>it.t===v);
+  el('count').textContent=pool.length+' quotes'+(v==='__all'?' · '+THEMES.length+' themes':' in this theme')+' · ☁ Google Sheet';
+  el('hiddenCount').textContent=hiddenCount();
+  if(keep){ current=keep; history=[keep.id]; histPos=0; renderFreq(); updateNav(); }
+  else if(!pool.length){ renderEmpty(); updateNav(); }
+  else { resetHistory(); current=null; show(); }
   renderAccount();
-  el('count').textContent='Loading…';
-  try{ await store.load(); }
-  catch(err){
-    if(store.sheet){ store=LocalStore; try{ await store.load(); }catch(e){} toast('Google Sheet unavailable — using local mode.'); }
+}
+async function init(){
+  // Phase 1: paint a quote instantly from the built-in copy — no network wait.
+  syncing = SHEET_CONFIGURED;
+  const useSheet = SHEET_CONFIGURED;
+  store = LocalStore;
+  renderAccount();
+  await LocalStore.load();
+  refreshThemes(); applyFilter();
+  // Phase 2: quietly swap in the live Google Sheet in the background.
+  if(useSheet){
+    try{ await SheetStore.load(); afterSheetLoad(); }
+    catch(err){ syncing=false; store=LocalStore; renderAccount(); toast('Google Sheet unavailable — showing the built-in copy.'); }
   }
-  renderAccount(); refreshThemes(); applyFilter();
 }
 init();
 </script>
