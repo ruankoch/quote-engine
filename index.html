@@ -159,7 +159,7 @@
       <button class="pref danger" id="del" title="Never show this quote again">🗑 Never show</button>
     </div>
   </div>
-  <div class="count"><span id="count"></span> · <a class="resetlink" id="reset">reset weights</a></div>
+  <div class="count"><span id="count"></span> · <a class="resetlink" id="reset">reset frequency</a></div>
 
   <div class="toast" id="toast"></div>
   <div class="overlay" id="overlay"></div>
@@ -583,7 +583,7 @@ el('del').addEventListener('click', delCurrent);
 el('filter').addEventListener('change', applyFilter);
 el('mode').addEventListener('click', ()=>{ const h=document.documentElement; h.dataset.mode=h.dataset.mode==='dark'?'light':'dark'; });
 el('reset').addEventListener('click', async ()=>{
-  try{ await store.resetWeights(); renderFreq(); toast('Frequency weights reset.'); }catch(err){ toast(saveErr(err)); } });
+  try{ await store.resetWeights(); renderFreq(); toast('Frequency reset.'); }catch(err){ toast(saveErr(err)); } });
 
 el('manage').addEventListener('click', ()=>{ resetForm(); openDrawer(); });
 el('closeDrawer').addEventListener('click', closeDrawer);
