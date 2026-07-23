@@ -30,9 +30,11 @@
     margin:0; background:radial-gradient(circle at 50% -10%, color-mix(in srgb,var(--accent) 8%, var(--bg)), var(--bg) 60%);
     color:var(--ink); font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
     display:flex; flex-direction:column; align-items:center; justify-content:center;
-    padding:64px 18px 52px; height:100vh; overflow:hidden; transition:background .4s,color .4s;
+    padding:64px 18px 52px;
+    padding-top:calc(64px + env(safe-area-inset-top)); padding-bottom:calc(52px + env(safe-area-inset-bottom));
+    height:100vh; height:100dvh; overflow:hidden; transition:background .4s,color .4s;
   }
-  .topbar{position:fixed; top:14px; left:0; right:0; display:flex; gap:10px; justify-content:space-between;
+  .topbar{position:fixed; top:calc(14px + env(safe-area-inset-top)); left:0; right:0; display:flex; gap:10px; justify-content:space-between;
     align-items:center; padding:0 18px; max-width:940px; margin:0 auto; width:100%; z-index:5;}
   .tb-right{display:flex; gap:8px}
   select,.iconbtn{
@@ -47,7 +49,9 @@
   .card{
     background:var(--card); border:1px solid var(--line); border-radius:22px; box-shadow:var(--shadow);
     max-width:760px; width:100%; padding:clamp(24px,4vw,52px); position:relative; overflow:hidden;
-    max-height:calc(100vh - 132px); display:flex; flex-direction:column; isolation:isolate;
+    max-height:calc(100vh - 132px);
+    max-height:calc(100dvh - 132px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    display:flex; flex-direction:column; isolation:isolate;
   }
   .card>*{position:relative; z-index:1}
   .card::before{content:"\201C"; position:absolute; top:-8px; left:16px; font-size:clamp(84px,22vw,150px); line-height:1;
