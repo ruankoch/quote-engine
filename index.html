@@ -2,8 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Quote Engine</title>
+<meta name="theme-color" content="#f4f1ea">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Quote Engine">
 <script>
   // Google Sheets sync. Leave blank for local mode (this browser only).
   // Baked at build time from QE_SHEET_API / QE_SHEET_KEY env vars, or paste
@@ -42,10 +47,11 @@
   .card{
     background:var(--card); border:1px solid var(--line); border-radius:22px; box-shadow:var(--shadow);
     max-width:760px; width:100%; padding:clamp(24px,4vw,52px); position:relative; overflow:hidden;
-    max-height:calc(100vh - 132px); display:flex; flex-direction:column;
+    max-height:calc(100vh - 132px); display:flex; flex-direction:column; isolation:isolate;
   }
-  .card::before{content:"\201C"; position:absolute; top:-18px; left:18px; font-size:150px; line-height:1;
-    color:var(--accent); opacity:.14; font-family:Georgia,serif; pointer-events:none;}
+  .card>*{position:relative; z-index:1}
+  .card::before{content:"\201C"; position:absolute; top:-8px; left:16px; font-size:clamp(84px,22vw,150px); line-height:1;
+    color:var(--accent); opacity:.12; font-family:Georgia,serif; pointer-events:none; z-index:0;}
   .theme{flex:0 0 auto; align-self:flex-start; font-family:system-ui,sans-serif; font-size:12px; letter-spacing:.08em;
     text-transform:uppercase; font-weight:600; color:var(--accent);
     background:color-mix(in srgb,var(--accent) 12%, transparent); border:1px solid color-mix(in srgb,var(--accent) 25%, transparent);
@@ -620,7 +626,8 @@ el('less').addEventListener('click', ()=>adjust(LESSF));
 el('edit').addEventListener('click', ()=>{ if(current){ loadIntoForm(current); openDrawer(); } });
 el('del').addEventListener('click', delCurrent);
 el('filter').addEventListener('change', applyFilter);
-el('mode').addEventListener('click', ()=>{ const h=document.documentElement; h.dataset.mode=h.dataset.mode==='dark'?'light':'dark'; });
+function applyThemeColor(){ const m=document.querySelector('meta[name="theme-color"]'); if(m) m.setAttribute('content', document.documentElement.dataset.mode==='dark'?'#14110d':'#f4f1ea'); }
+el('mode').addEventListener('click', ()=>{ const h=document.documentElement; h.dataset.mode=h.dataset.mode==='dark'?'light':'dark'; applyThemeColor(); });
 el('reset').addEventListener('click', async ()=>{
   try{ await store.resetWeights(); renderFreq(); toast('Frequency reset.'); }catch(err){ toast(saveErr(err)); } });
 
@@ -665,6 +672,7 @@ function afterSheetLoad(){
   renderAccount();
 }
 async function init(){
+  applyThemeColor();
   // Phase 1: paint a quote instantly from the built-in copy — no network wait.
   syncing = SHEET_CONFIGURED;
   const useSheet = SHEET_CONFIGURED;
